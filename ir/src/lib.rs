@@ -1,3 +1,9 @@
+pub struct YulObject {
+    pub code: Block,
+    pub objects: Vec<(String, YulObject)>,
+    pub data: Vec<(String, Vec<u8>)>,
+}
+
 pub struct Block(pub Vec<Statement>);
 
 type Literal = [u8; 32];
