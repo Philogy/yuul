@@ -6,7 +6,7 @@ pub struct YulObject {
 
 pub struct Block(pub Vec<Statement>);
 
-type Literal = [u8; 32];
+pub type Literal = [u8; 32];
 
 pub enum Expr {
     VarRef(String),

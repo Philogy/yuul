@@ -249,6 +249,9 @@ dependencies = [
 [[package]]
 name = "dunce-schedule"
 version = "0.1.0"
+dependencies = [
+ "ir",
+]
 
 [[package]]
 name = "either"
