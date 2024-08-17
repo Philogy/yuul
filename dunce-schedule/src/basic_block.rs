@@ -144,14 +144,18 @@ mod test {
         let bb = BasicBlock {
             start_stack: vec!["sender_slot".to_owned(), "amount".to_owned()],
             assignments: vec![Assignment::new(
-                vec!["balance"],
+                vec!["balance", "skrr"],
                 Expr::call2(
                     "add",
                     Expr::call1("sload", Expr::r("sender_slot")),
                     Expr::r("amount"),
                 ),
             )],
-            end_stack: vec!["amount".to_owned(), "sender_slot".to_owned()],
+            end_stack: vec![
+                "amount".to_owned(),
+                "skrr".to_owned(),
+                "sender_slot".to_owned(),
+            ],
         };
 
         dbg!(bb.flatten_to().schedule_memory());
