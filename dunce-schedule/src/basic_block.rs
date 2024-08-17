@@ -3,8 +3,24 @@ use std::collections::BTreeMap;
 use crate::ssa_block::{Block as SSABlock, Name, Statement, Value};
 use ir::{FunctionDefinition, Literal};
 
-const RET_ADDR: &str = "__ret_addr__";
-const COND: &str = "__cond__";
+static mut COUNTER: u32 = 0;
+
+fn get_counter() -> u32 {
+    let counter: u32;
+    unsafe {
+        counter = COUNTER;
+        COUNTER += 1;
+    }
+    counter
+}
+
+fn get_cond_label() -> String {
+    format!("__cond__{}__", get_counter())
+}
+
+fn get_ret_label() -> String {
+    format!("__ret_addr__{}__", get_counter())
+}
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -235,7 +251,7 @@ impl BasicBlocksBuilder {
         on_iter_builder.basic_blocks.push(last_bb);
 
         let mut cond_builder = setup_builder.derive_builder();
-        let cond_var: String = COND.into();
+        let cond_var: String = get_cond_label();
         cond_builder.split_assignment(vec![cond_var.clone()], cond);
         let mut end_stack = cond_builder.start_stack.clone();
         end_stack.push(cond_var.clone());
@@ -272,7 +288,7 @@ impl BasicBlocksBuilder {
     }
 
     fn split_fn_def(&mut self, f: ir::FunctionDefinition) {
-        let ret_addr: String = RET_ADDR.into();
+        let ret_addr: String = get_ret_label();
         let FunctionDefinition { name, args, rets, body } = f;
         let mut start_stack = args;
         start_stack.extend(rets.clone());
@@ -303,7 +319,7 @@ impl BasicBlocksBuilder {
 
     fn split_if(&mut self, body: ir::Block) {
         let mut end_stack = self.current_stack.clone();
-        end_stack.push(COND.into());
+        end_stack.push(get_cond_label());
         let bb = BasicBlock {
             start_stack: self.start_stack.clone(),
             assignments: self.assignments.clone(),
