@@ -1,5 +1,26 @@
+use std::collections::BTreeMap;
+
 use crate::ssa_block::{Block as SSABlock, Name, Statement, Value};
-use ir::Literal;
+use ir::{FunctionDefinition, Literal};
+
+static mut COUNTER: u32 = 0;
+
+fn get_counter() -> u32 {
+    let counter: u32;
+    unsafe {
+        counter = COUNTER;
+        COUNTER += 1;
+    }
+    counter
+}
+
+fn get_cond_label() -> String {
+    format!("__cond__{}__", get_counter())
+}
+
+fn get_ret_label() -> String {
+    format!("__ret_addr__{}__", get_counter())
+}
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -25,6 +46,22 @@ impl Expr {
         Expr::Call {
             fn_name: name.to_owned(),
             args,
+        }
+    }
+}
+
+impl From<ir::Expr> for Expr {
+    fn from(value: ir::Expr) -> Self {
+        match value {
+            ir::Expr::VarRef(vr) => Expr::Refr(vr),
+            ir::Expr::Literal(literal) => Expr::Literal(literal),
+            ir::Expr::Call { fn_name, args: ir_args } => {
+                let mut args = Vec::new();
+                for arg in ir_args {
+                    args.push(arg.into());
+                }
+                Expr::Call { fn_name, args }
+            },
         }
     }
 }
@@ -89,6 +126,219 @@ pub struct BasicBlock {
     end_stack: Vec<String>,
 }
 
+struct BasicBlocksBuilder {
+    start_stack: Vec<String>,
+    current_stack: Vec<String>,
+    assignments: Vec<Assignment>,
+    functions: BTreeMap<String, Vec<BasicBlock>>,
+    basic_blocks: Vec<BasicBlock>,
+    loop_revert_state: Option<Vec<String>>,
+    loop_continue_state: Option<Vec<String>>,
+    fn_return: Option<Vec<String>>
+}
+
+impl BasicBlocksBuilder {
+    fn new(start_stack: &Vec<String>) -> Self {
+        Self {
+            start_stack: start_stack.clone(),
+            current_stack: start_stack.clone(),
+            assignments: Vec::new(),
+            functions: BTreeMap::new(),
+            basic_blocks: Vec::new(),
+            loop_revert_state: None,
+            loop_continue_state: None,
+            fn_return: None
+        }
+    }
+
+    fn derive_builder(&self) -> Self {
+        Self {
+            start_stack: self.current_stack.clone(),
+            current_stack: self.current_stack.clone(),
+            assignments: Vec::new(),
+            functions: BTreeMap::new(),
+            basic_blocks: Vec::new(),
+            loop_revert_state: self.loop_revert_state.clone(),
+            loop_continue_state: self.loop_continue_state.clone(),
+            fn_return: self.fn_return.clone()
+        }
+    }
+
+    fn split_block(&mut self, block: ir::Block) {
+        for statement in block.0 {
+            match statement {
+                ir::Statement::Block(block) => self.split_block(block),
+                ir::Statement::FnDef(f) => self.split_fn_def(f),
+                ir::Statement::Assignment { to, expr } => self.split_assignment(to, expr),
+                ir::Statement::If { cond: _, body } => self.split_if(body),
+                ir::Statement::Switch { cond, cases, default } => todo!(),
+                ir::Statement::ForLoop { setup, cond, on_iter, body } => self.split_for(setup, cond, on_iter, body),
+                ir::Statement::Leave => {
+                    let bb = BasicBlock {
+                        start_stack: self.start_stack.clone(),
+                        assignments: self.assignments.clone(),
+                        end_stack: self.fn_return.clone().unwrap(),
+                    };
+                    self.basic_blocks.push(bb);
+                    self.assignments = Vec::new();
+                    self.start_stack = self.current_stack.clone();
+                },
+                ir::Statement::Break => {
+                    let mut bb = BasicBlock {
+                        start_stack: self.start_stack.clone(),
+                        assignments: self.assignments.clone(),
+                        end_stack: self.current_stack.clone(),
+                    };
+                    if let Some(loop_revert_state) = self.loop_revert_state.clone() {
+                        bb.end_stack = loop_revert_state
+                    }
+                    self.basic_blocks.push(bb);
+                    self.assignments = Vec::new();
+                    self.start_stack = self.current_stack.clone();
+                },
+                ir::Statement::Continue => {
+                    let mut bb = BasicBlock {
+                        start_stack: self.start_stack.clone(),
+                        assignments: self.assignments.clone(),
+                        end_stack: self.current_stack.clone(),
+                    };
+                    if let Some(loop_continue_state) = self.loop_continue_state.clone() {
+                        bb.end_stack = loop_continue_state
+                    }
+                    self.basic_blocks.push(bb);
+                    self.assignments = Vec::new();
+                    self.start_stack = self.current_stack.clone();
+                },
+            }
+        }
+        if self.start_stack != self.current_stack || self.assignments.len() > 0 {
+            let bb = BasicBlock {
+                start_stack: self.start_stack.clone(),
+                assignments: self.assignments.clone(),
+                end_stack: self.current_stack.clone(),
+            };
+            self.basic_blocks.push(bb);
+        }
+        
+    }
+
+    fn split_for(&mut self, setup: ir::Block, cond: ir::Expr, on_iter: ir::Block, body: ir::Block) {
+        let end_stack = self.current_stack.clone();
+        let bb = BasicBlock {
+            start_stack: self.start_stack.clone(),
+            assignments: self.assignments.clone(),
+            end_stack,
+        };
+        self.basic_blocks.push(bb);
+        self.start_stack = self.current_stack.clone();
+        self.assignments = Vec::new();
+        
+        let mut setup_builder = self.derive_builder();
+        setup_builder.split_block(setup);
+        
+        let mut body_builder = setup_builder.derive_builder();
+        body_builder.loop_revert_state = Some(setup_builder.start_stack.clone());
+        body_builder.loop_continue_state = Some(setup_builder.current_stack.clone());
+        body_builder.split_block(body);
+        let mut last_bb = body_builder.basic_blocks.pop().unwrap();
+        last_bb.end_stack = setup_builder.current_stack.clone();
+        body_builder.basic_blocks.push(last_bb);
+
+        let mut on_iter_builder = setup_builder.derive_builder();
+        on_iter_builder.split_block(on_iter);
+        let mut last_bb = on_iter_builder.basic_blocks.pop().unwrap();
+        last_bb.end_stack = on_iter_builder.start_stack.clone();
+        on_iter_builder.basic_blocks.push(last_bb);
+
+        let mut cond_builder = setup_builder.derive_builder();
+        let cond_var: String = get_cond_label();
+        cond_builder.split_assignment(vec![cond_var.clone()], cond);
+        let mut end_stack = cond_builder.start_stack.clone();
+        end_stack.push(cond_var.clone());
+        let bb = BasicBlock {
+            start_stack: cond_builder.start_stack.clone(),
+            assignments: cond_builder.assignments.clone(),
+            end_stack,
+        };
+        cond_builder.basic_blocks.push(bb);
+        let bb = BasicBlock {
+            start_stack: cond_builder.start_stack.clone(),
+            assignments: Vec::new(),
+            end_stack: setup_builder.start_stack.clone(),
+        };
+        cond_builder.basic_blocks.push(bb);
+
+        self.consume_builder(setup_builder);
+        self.consume_builder(body_builder);
+        self.consume_builder(on_iter_builder);
+        self.consume_builder(cond_builder);
+    }
+
+    fn split_assignment(&mut self, to: Vec<String>, expr: ir::Expr) {
+        for v in to.clone() {
+            if !self.current_stack.contains(&v) {
+                self.current_stack.push(v);
+            }
+        }
+        let assignment = Assignment {
+            to_idents: to,
+            expr: expr.into(),
+        };
+        self.assignments.push(assignment);      
+    }
+
+    fn split_fn_def(&mut self, f: ir::FunctionDefinition) {
+        let ret_addr: String = get_ret_label();
+        let FunctionDefinition { name, args, rets, body } = f;
+        let mut start_stack = args;
+        start_stack.extend(rets.clone());
+        start_stack.push(ret_addr.clone());
+
+        let mut assignments: Vec<Assignment> = Vec::new();
+        for ret in &rets {
+            assignments.push(Assignment {
+                to_idents: vec![ret.to_owned()],
+                expr: Expr::Literal([0u8;32]),
+            });
+        }
+
+        let mut end_stack = rets;
+        end_stack.push(ret_addr.clone());
+
+        let mut builder = BasicBlocksBuilder::new(&start_stack);
+        builder.fn_return = Some(end_stack.clone());
+        builder.assignments = assignments;
+        builder.split_block(body);
+        let mut basic_blocks = builder.basic_blocks;
+        let mut last_bb = basic_blocks.pop().unwrap();
+        last_bb.end_stack = end_stack;
+        basic_blocks.push(last_bb);
+        self.functions.insert(name, basic_blocks);
+        self.functions.extend(builder.functions);
+    }
+
+    fn split_if(&mut self, body: ir::Block) {
+        let mut end_stack = self.current_stack.clone();
+        end_stack.push(get_cond_label());
+        let bb = BasicBlock {
+            start_stack: self.start_stack.clone(),
+            assignments: self.assignments.clone(),
+            end_stack,
+        };
+        self.basic_blocks.push(bb);
+        self.start_stack = self.current_stack.clone();
+        self.assignments = Vec::new();
+        let mut builder = self.derive_builder();
+        builder.split_block(body);
+        self.consume_builder(builder);
+    }
+
+    fn consume_builder(&mut self, builder: BasicBlocksBuilder) {
+        self.basic_blocks.extend(builder.basic_blocks);
+        self.functions.extend(builder.functions);
+    }
+}
+
 impl BasicBlock {
     fn flatten_to(self) -> SSABlock {
         let mut flattener = FlatStatementBuilder::default();
@@ -138,6 +388,221 @@ impl BasicBlock {
 mod test {
     use super::*;
     use crate::scheduler::MemoryScheduler;
+
+    #[test]
+    fn test_bb_assign() {
+        let s1 = ir::Statement::Assignment {
+            to: vec!["a".into(), "b".into(), "c".into()], 
+            expr: ir::Expr::Literal([0u8; 32])
+        };
+        let s2 = ir::Statement::Assignment {
+            to: vec!["a".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+        let block = ir::Block { 0: vec![s1, s2] };
+        let mut builder = BasicBlocksBuilder::new(&vec![]);
+        builder.split_block(block);
+        dbg!(builder.basic_blocks);
+        dbg!(builder.functions);
+    }
+
+    #[test]
+    fn test_bb_assign_fndef_assign() {
+        let s1 = ir::Statement::Assignment {
+            to: vec!["a".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+        let f = ir::Statement::FnDef(
+            ir::FunctionDefinition {
+                name: "bla".into(),
+                args: vec!["x".into(), "y".into()],
+                rets: vec!["z".into()],
+                body: ir::Block{ 0: vec![ir::Statement::Assignment {
+                    to: vec!["a".into()],
+                    expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+                }]},
+            }
+        );
+        let s2 = ir::Statement::Assignment {
+            to: vec!["b".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+        let block = ir::Block { 0: vec![s1, f, s2] };
+        let mut builder = BasicBlocksBuilder::new(&vec![]);
+        builder.split_block(block);
+        dbg!(builder.basic_blocks);
+        dbg!(builder.functions);
+    }
+
+    #[test]
+    fn test_bb_if() {
+        let s1 = ir::Statement::Assignment {
+            to: vec!["a".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+        
+        let a1 = ir::Statement::Assignment {
+            to: vec!["x".into()],
+            expr: ir::Expr::Call { fn_name: "x_raise".into(), args: vec![] }
+        };
+        let if_stmt = ir::Statement::If {
+            cond: ir::Expr::Call { fn_name: "if_var".into(), args: vec![] },
+            body: ir::Block { 0: vec![ir::Statement::Assignment {
+                to: vec!["if".into()], 
+                expr: ir::Expr::Call { fn_name: "nothing".into(), args: vec![] }
+            }] }
+        };
+        let a2 = ir::Statement::Assignment {
+            to: vec!["y".into()],
+            expr: ir::Expr::Call { fn_name: "y_raise".into(), args: vec![] }
+        };
+
+        let s2 = ir::Statement::Assignment {
+            to: vec!["b".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+
+        let block = ir::Block{ 0: vec![s1, a1, if_stmt, a2, s2]};
+        let mut builder = BasicBlocksBuilder::new(&vec![]);
+        builder.split_block(block);
+        dbg!(builder.basic_blocks);
+        dbg!(builder.functions);
+    }
+
+    #[test]
+    fn test_bb_for_loop_continue() {
+        let s1 = ir::Statement::Assignment {
+            to: vec!["a".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+        let s2 = ir::Statement::Assignment {
+            to: vec!["b".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+
+        let setup = ir::Block {
+            0: vec![ir::Statement::Assignment {
+                to: vec!["i".into()],
+                expr: ir::Expr::Literal([0u8; 32])
+            }]
+        };
+        let cond = ir::Expr::Literal([1u8; 32]);
+        let on_iter = ir::Block {
+            0: vec![ir::Statement::Assignment {
+                to: vec!["i".into()],
+                expr: ir::Expr::Call { fn_name: "add".into(), args: vec![] }
+            }]
+        };
+        let a1 = ir::Statement::Assignment {
+            to: vec!["x".into()],
+            expr: ir::Expr::Call { fn_name: "x_raise".into(), args: vec![] }
+        };
+        let if_stmt = ir::Statement::If {
+            cond: ir::Expr::Call { fn_name: "continue".into(), args: vec![] },
+            body: ir::Block { 0: vec![ir::Statement::Continue] }
+        };
+        let a2 = ir::Statement::Assignment {
+            to: vec!["y".into()],
+            expr: ir::Expr::Call { fn_name: "y_raise".into(), args: vec![] }
+        };
+        let body = ir::Block{ 0: vec![a1, if_stmt, a2]};
+        let for_loop = ir::Statement::ForLoop {
+            setup,
+            cond,
+            on_iter,
+            body
+        };
+        let block = ir::Block { 0: vec![s1, s2, for_loop] };
+        let mut builder = BasicBlocksBuilder::new(&vec![]);
+        builder.split_block(block);
+        dbg!(builder.basic_blocks);
+        dbg!(builder.functions);
+    }
+
+    #[test]
+    fn test_bb_for_loop_break() {
+        let s1 = ir::Statement::Assignment {
+            to: vec!["a".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+        let s2 = ir::Statement::Assignment {
+            to: vec!["b".into()],
+            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![] }
+        };
+
+        let setup = ir::Block {
+            0: vec![ir::Statement::Assignment {
+                to: vec!["i".into()],
+                expr: ir::Expr::Literal([0u8; 32])
+            }]
+        };
+        let cond = ir::Expr::Literal([1u8; 32]);
+        let on_iter = ir::Block {
+            0: vec![ir::Statement::Assignment {
+                to: vec!["i".into()],
+                expr: ir::Expr::Call { fn_name: "add".into(), args: vec![] }
+            }]
+        };
+        let a1 = ir::Statement::Assignment {
+            to: vec!["x".into()],
+            expr: ir::Expr::Call { fn_name: "x_raise".into(), args: vec![] }
+        };
+        let if_stmt = ir::Statement::If {
+            cond: ir::Expr::Call { fn_name: "break".into(), args: vec![] },
+            body: ir::Block { 0: vec![ir::Statement::Break] }
+        };
+        let a2 = ir::Statement::Assignment {
+            to: vec!["y".into()],
+            expr: ir::Expr::Call { fn_name: "y_raise".into(), args: vec![] }
+        };
+        let body = ir::Block{ 0: vec![a1, if_stmt, a2]};
+        let for_loop = ir::Statement::ForLoop {
+            setup,
+            cond,
+            on_iter,
+            body
+        };
+        let block = ir::Block { 0: vec![s1, s2, for_loop] };
+        let mut builder = BasicBlocksBuilder::new(&vec![]);
+        builder.split_block(block);
+        dbg!(builder.basic_blocks);
+        dbg!(builder.functions);
+    }
+
+    #[test]
+    fn test_bb_fndef() {
+        let f = ir::Statement::FnDef(
+            ir::FunctionDefinition {
+                name: "bla".into(),
+                args: vec!["x".into(), "y".into()],
+                rets: vec!["z".into()],
+                body: ir::Block{ 
+                    0: vec![
+                        ir::Statement::Assignment {
+                            to: vec!["a".into()],
+                            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![], }
+                        },
+                        ir::Statement::Assignment {
+                            to: vec!["b".into()],
+                            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![], }
+                        },
+                        ir::Statement::If {
+                            cond: ir::Expr::Call { fn_name: "leave".into(), args: vec![] },
+                            body: ir::Block { 0: vec![ir::Statement::Leave] }
+                        },
+                        ir::Statement::Assignment {
+                            to: vec!["c".into()],
+                            expr: ir::Expr::Call { fn_name: "bla".into(), args: vec![], }
+                        },
+                ]},
+            }
+        );
+        let block = ir::Block { 0: vec![f] };
+        let mut builder = BasicBlocksBuilder::new(&vec![]);
+        builder.split_block(block);
+        dbg!(builder.basic_blocks);
+        dbg!(builder.functions);
+    }
 
     #[test]
     fn test_flatten() {
