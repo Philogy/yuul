@@ -1,12 +1,12 @@
 use ir::Literal;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Name {
     Ident(String),
     Intermed(usize),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub enum Value {
     RefName(Name),
     Literal(Literal),

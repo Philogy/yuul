@@ -12,6 +12,7 @@ pub enum Expr {
     VarRef(String),
     Literal(Literal),
     Call { fn_name: String, args: Vec<Expr> },
+    Builtin { fn_name: String, input: String },
 }
 
 pub enum Statement {
