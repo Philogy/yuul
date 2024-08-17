@@ -137,6 +137,7 @@ impl BasicBlock {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::scheduler::MemoryScheduler;
 
     #[test]
     fn test_flatten() {
@@ -153,6 +154,6 @@ mod test {
             end_stack: vec!["amount".to_owned(), "sender_slot".to_owned()],
         };
 
-        dbg!(bb.flatten_to());
+        dbg!(bb.flatten_to().schedule_memory());
     }
 }
