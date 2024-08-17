@@ -3,9 +3,10 @@
 members = [
     "dunce-schedule",
     "ir"
-]
+, "k-parser"]
 
 resolver = "2"
 
 [workspace.dependencies]
 ir = { path = "./ir/" }
+k-parser = { path = "./k-parser/" }

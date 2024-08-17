@@ -1,0 +1,92 @@
+module YUL-TOKEN
+    imports INT-SYNTAX
+    imports BOOL-SYNTAX
+    imports STRING-SYNTAX
+
+    syntax Identifier ::= r"[a-zA-Z_$][a-zA-Z_$0-9.]*" [token, prec(-1)]
+
+    syntax HexLiteral ::= r"0x{HexRawLiteral}" [token, prec(3)]
+ 
+    syntax HexDataLiteral ::= r"hex\\\"{HexRawLiteral}\\\"" [token]
+
+    syntax lexical HexRawLiteral = r"[0-9a-fA-F]*"
+
+    syntax String ::= Identifier2String ( Identifier ) [function, total, hook(STRING.token2string)]
+                    | HexLiteral2String ( HexLiteral ) [function, total, hook(STRING.token2string)]
+
+endmodule
+
+module YUL-SYNTAX
+    imports YUL-TOKEN
+
+    syntax IdentifierList ::= NeList{Identifier, ","} [symbol(id_list)]
+
+    syntax TypedIdentifier ::= Identifier | Identifier ":" Identifier [symbol(typed_id)]
+    syntax TypedIdentifierList ::= NeList{TypedIdentifier, ","} [symbol(typed_id_list)]
+
+    syntax Literal ::= NumberLiteral | StringLiteral | BoolLiteral | HexLiteral
+    syntax TypedLiteral ::= Literal | Literal ":" Identifier [symbol(typed_literal)]
+
+    syntax NumberLiteral ::= HexLiteral | Int
+
+    syntax StringLiteral ::= String
+
+    syntax BoolLiteral ::= Bool
+
+    syntax Code ::= "code" "{" StatementList FunctionDefinitionList "}" [symbol(code)]
+
+    syntax DataLiteral ::= StringLiteral | HexDataLiteral
+    syntax Data ::= "data" StringLiteral DataLiteral [symbol(data)]
+    syntax DataList ::= List{Data, ""} [symbol(data_list)]
+
+    syntax Block ::= "{" StatementList "}" [symbol(block)]
+
+    syntax Statement ::= Block
+                       | VariableDeclaration
+                       | Assignment
+                       | If
+                       | Expression
+                       | Switch
+                       | ForLoop
+                       | BreakContinue
+                       | Leave
+    syntax StatementList ::= List{Statement, ""} [symbol(statement_list)]
+
+    syntax FunctionType ::= "(" TypedIdentifierList ")"                          [symbol(function_arg_type)]
+                          | "(" TypedIdentifierList ")" "->" TypedIdentifierList [symbol(function_arg_return_type)]
+                          | "(" ")"                                              [symbol(function_empty_type)]
+                          | "(" ")" "->" TypedIdentifierList                     [symbol(function_return_type)]
+    syntax FunctionDefinition ::= "function" Identifier FunctionType Block [symbol(function_definition)]
+    syntax FunctionDefinitionList ::= List{FunctionDefinition, ""} [symbol(function_definition_list)]
+
+    syntax VariableDeclaration ::= "let" TypedIdentifierList                 [symbol(let_empty)]
+                                 | "let" TypedIdentifierList ":=" Expression [symbol(let)]
+
+    syntax Assignment ::= IdentifierList ":=" Expression [symbol(assignment)]
+
+    syntax Expression ::= FunctionCall | Identifier | Literal
+    syntax ExpressionList ::= List{Expression, ","} [symbol(expression_list)]
+
+    syntax Value ::= Int
+    syntax ValueList ::= List{Value, ","} [symbol(value_list)]
+
+    syntax If ::= "if" Expression Block [symbol(if)]
+                | "if" Block            [symbol(if_guarded)]
+
+    syntax Switch ::= "switch" Expression CaseList Default [symbol(switch)]
+                    | "switch" Expression CaseList         [symbol(switch_default)]
+    syntax Case ::= "case" Literal Block [symbol(case)]
+    syntax CaseList ::= List{Case, ""}   [symbol(case_list)]
+    syntax Default ::= "default" Block   [symbol(default)]
+
+    syntax ForLoop ::= "for" Block Expression Block Block [symbol(for)]
+
+    syntax BreakContinue ::= "break"    [symbol(break)]
+                           | "continue" [symbol(continue)]
+    syntax Leave ::= "leave" [symbol(leave)]
+
+    syntax FunctionCall ::= Identifier "(" ExpressionList ")" [symbol(function_call)]
+                          | Identifier "(" ValueList      ")" [symbol(function_call_values), prefer]
+                          | #call ( String , ValueList )      [symbol(function_call_internal)]
+
+endmodule
